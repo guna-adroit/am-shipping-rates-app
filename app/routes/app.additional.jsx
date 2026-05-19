@@ -1,5 +1,11 @@
 //app.additional.jsx
+ export async function loader() {
+    const response = await fetch("https://dummyjson.com/products");
+    return response.json();
+  }
+  
 export default function AdditionalPage() {
+ 
   return (
     <s-page heading="Additional page">
       <s-section heading="Multiple pages">

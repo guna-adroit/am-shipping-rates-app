@@ -1,6 +1,5 @@
 import { redirect, data } from "react-router";
-import { Form, useActionData, useNavigate, useNavigation } from "react-router";
-import { useRef, useEffect } from "react";
+import { Form, useActionData, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { createZone } from "../models/zone.server";
@@ -18,6 +17,7 @@ export const action = async ({ request }) => {
   if (!zipCodes) errors.zipCodes = "At least one zip code is required";
 
   if (Object.keys(errors).length) {
+    // Pass submitted values back so fields stay filled on error
     return data({ errors, values: { name, zipCodes, status } }, { status: 400 });
   }
 
@@ -27,29 +27,16 @@ export const action = async ({ request }) => {
 
 export default function NewZonePage() {
   const actionData = useActionData();
-  const navigate = useNavigate();
   const navigation = useNavigation();
   const isSaving = navigation.state === "submitting";
   const FORM_ID = "create-zone-form";
 
-  // Refs for web component inputs
-  const nameRef = useRef(null);
-  const zipCodesRef = useRef(null);
-  const statusRef = useRef(null);
-
-  // On validation error, repopulate web component values from actionData
-  useEffect(() => {
-    if (!actionData?.values) return;
-    if (nameRef.current) nameRef.current.value = actionData.values.name ?? "";
-    if (zipCodesRef.current) zipCodesRef.current.value = actionData.values.zipCodes ?? "";
-    if (statusRef.current) statusRef.current.value = actionData.values.status ?? "enabled";
-  }, [actionData]);
-
   return (
     <s-page heading="Create a zone">
-      {/* Save — no variant on primary-action (follows template pattern) */}
+      {/* Page-level actions rendered in Shopify admin header */}
       <s-button
         slot="primary-action"
+        variant="primary"
         {...(isSaving ? { loading: true } : {})}
         onClick={() => document.getElementById(FORM_ID)?.requestSubmit()}
       >
@@ -57,64 +44,67 @@ export default function NewZonePage() {
       </s-button>
       <s-link slot="secondary-actions" href="/app/zones">Cancel</s-link>
 
-      {/*
-        Form holds only the web component fields.
-        s- form components are form-associated custom elements —
-        they submit their value via the native form API when name is set.
-      */}
+      {/* Form — web components with name="" participate in native form submission */}
       <Form method="post" id={FORM_ID}>
+        {/* Zone details section */}
         <s-section heading="Zone details">
           <s-stack direction="block" gap="base">
             <s-paragraph>
               Give your zone a name and specify which zip codes are included.
-              Once you create the zone, you can add shipping rates.
+              Once you've created your zone you will be able to add rates.
             </s-paragraph>
 
             <s-text-field
-              ref={nameRef}
               label="Zone name"
               name="name"
-              help-text="For internal use only — not visible to customers."
+              value={actionData?.values?.name ?? ""}
+              help-text="This is for internal use only and will not be visible to your customers."
               error-message={actionData?.errors?.name ?? ""}
               required
-              placeholder="e.g. Metro Area, Rural Zone"
             ></s-text-field>
 
             <s-text-area
-              ref={zipCodesRef}
               label="Zip codes"
               name="zipCodes"
+              value={actionData?.values?.zipCodes ?? ""}
               rows="4"
-              help-text="Separate postal codes with a comma. Each postal code must belong to only one zone."
+              help-text="Separate eligible postal codes with a comma. Overlapping postal codes are not supported—each location needs a unique set."
               error-message={actionData?.errors?.zipCodes ?? ""}
               required
               placeholder="e.g. 10001, 10002, 90210"
             ></s-text-area>
 
             <s-select
-              ref={statusRef}
               label="Zone status"
               name="status"
+              value={actionData?.values?.status ?? "enabled"}
             >
-              <s-option value="enabled">Enabled</s-option>
-              <s-option value="disabled">Disabled</s-option>
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
             </s-select>
-            
+                        <s-select
+            label="Product category"
+            placeholder="Choose category for better organization"
+            >
+            <s-option value="clothing">Clothing & apparel</s-option>
+            <s-option value="accessories">Accessories & jewelry</s-option>
+            <s-option value="home-garden">Home & garden</s-option>
+            <s-option value="electronics">Electronics & tech</s-option>
+            <s-option value="books">Books & media</s-option>
+            </s-select>
           </s-stack>
         </s-section>
-      </Form>
+        <br /><br />
 
-      {/*
-        IMPORTANT: slot="aside" must be a DIRECT child of <s-page>,
-        NOT inside <Form>. Web component slot distribution only works
-        for direct children of the shadow host.
-      */}
-      <s-section slot="aside" heading="Rates">
-        <s-paragraph>
-          Choose between price and weight-based rates. You'll be able to add
-          rates as soon as you create this zone.
-        </s-paragraph>
-      </s-section>
+        {/* Rates aside — shown after zone is saved */}
+        <s-section slot="aside" heading="Rates">
+          <s-paragraph>
+            Choose between price and weight-based rates. You'll be able to add
+            rates as soon as you create this zone.
+          </s-paragraph>
+        </s-section>
+      </Form>
+      
     </s-page>
   );
 }

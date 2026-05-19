@@ -1,16 +1,11 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model Session {
@@ -29,6 +24,44 @@ model Session {
   locale        String?
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
-  refreshToken        String?
-  refreshTokenExpires DateTime?
+  refreshToken         String?
+  refreshTokenExpires  DateTime?
+}
+
+model Zone {
+  id         String   @id @default(cuid())
+  shopDomain String
+  name       String
+  zipCodes   String   @db.Text
+  status     String   @default("enabled")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  rates      Rate[]
+
+  @@index([shopDomain])
+}
+
+model Rate {
+  id          String   @id @default(cuid())
+  zoneId      String
+  zone        Zone     @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  type        String   @default("price")
+  minValue    Float    @default(0)
+  maxValue    Float?
+  price       Float    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([zoneId])
+}
+
+model CarrierService {
+  id          String   @id @default(cuid())
+  shopDomain  String   @unique
+  serviceId   String
+  callbackUrl String   @default("")   // stored so we detect URL changes (tunnel restarts)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

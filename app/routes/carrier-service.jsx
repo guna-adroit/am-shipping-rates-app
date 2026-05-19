@@ -1,84 +1,95 @@
 /**
  * PUBLIC ROUTE — no Shopify session auth.
- * Shopify POSTs here at checkout to fetch available shipping rates.
+ * Shopify POSTs here at checkout to retrieve shipping rates.
  *
- * Path: /carrier-service
+ * Path:   /carrier-service
  * Header: X-Shopify-Shop-Domain: storename.myshopify.com
+ * Body:   { rate: { origin, destination, items, currency } }
  */
 import db from "../db.server";
 import { findZoneByZip } from "../models/zone.server";
 
-// GET — health check
+// GET — confirms the endpoint is reachable
 export const loader = async () => {
-  return Response.json({ status: "Zip Code Carrier Service is active" });
+  return Response.json({ status: "Zip Code Carrier Service active" });
 };
 
-// POST — called by Shopify at checkout
 export const action = async ({ request }) => {
   if (request.method !== "POST") {
     return Response.json({ error: "Method not allowed" }, { status: 405 });
   }
 
-  // 1. Identify shop from header
-  const shopDomain = request.headers.get("X-Shopify-Shop-Domain");
+  // 1. Identify shop
+  const shopDomain = request.headers.get("X-Shopify-Shop-Domain") || "am-shipping-rates.myshopify.com"; // for local testing with Shopify CLI preview URL
   if (!shopDomain) {
-    return Response.json(
-      { error: "Missing X-Shopify-Shop-Domain header" },
-      { status: 400 },
-    );
+    console.error("[carrier-service] Missing X-Shopify-Shop-Domain header");
+    return Response.json({ error: "Missing shop domain header" }, { status: 400 });
   }
+  console.log(`[carrier-service] Called for shop: ${shopDomain}`);
 
-  // 2. Verify shop is installed (security check)
-  const session = await db.session.findFirst({
-    where: { shop: shopDomain },
+  // 2. Verify this shop has the app installed
+  // Use CarrierService record — more reliable than Session (sessions can expire)
+  const carrierRecord = await db.carrierService.findUnique({
+    where: { shopDomain },
     select: { id: true },
   });
-  if (!session) {
+  if (!carrierRecord) {
+    console.error(`[carrier-service] No carrier record found for ${shopDomain}`);
     return Response.json({ rates: [] });
   }
 
-  // 3. Parse the rate request body
+  // 3. Parse body
   let body;
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
   const rateRequest = body?.rate;
   if (!rateRequest) return Response.json({ rates: [] });
 
-  const destinationZip = rateRequest.destination?.zip;
-  const currency = rateRequest.currency || "USD";
+  // IMPORTANT: Shopify uses "postal_code" not "zip"
+  const destinationZip = rateRequest.destination?.postal_code;
+  const currency = rateRequest.currency || "AUD";
 
-  if (!destinationZip) return Response.json({ rates: [] });
+  console.log(`[carrier-service] Destination postal_code: "${destinationZip}"`);
 
-  // 4. Find the zone matching this zip code
+  if (!destinationZip) {
+    console.error("[carrier-service] No postal_code in destination");
+    return Response.json({ rates: [] });
+  }
+
+  // 4. Find matching zone
   const zone = await findZoneByZip(shopDomain, destinationZip);
-  if (!zone || zone.rates.length === 0) return Response.json({ rates: [] });
+  console.log(
+    `[carrier-service] Zone match: ${zone ? `"${zone.name}" (${zone.rates.length} rates)` : "none"}`
+  );
+
+  if (!zone || zone.rates.length === 0) {
+    return Response.json({ rates: [] });
+  }
 
   // 5. Calculate cart totals
   // Shopify sends item prices in cents → convert to dollars
   const cartTotalDollars =
     (rateRequest.items ?? []).reduce(
-      (sum, item) => sum + item.price * item.quantity,
-      0,
+      (sum, item) => sum + item.price * item.quantity, 0
     ) / 100;
 
   // Shopify sends weight in grams → convert to kg
   const totalWeightKg =
     (rateRequest.items ?? []).reduce(
-      (sum, item) => sum + (item.grams ?? 0) * item.quantity,
-      0,
+      (sum, item) => sum + (item.grams ?? 0) * item.quantity, 0
     ) / 1000;
 
-  // 6. Filter and return applicable rates
+  console.log(`[carrier-service] Cart total: $${cartTotalDollars.toFixed(2)}, weight: ${totalWeightKg.toFixed(3)}kg`);
+
+  // 6. Filter matching rates
   const matchedRates = zone.rates
     .filter((rate) => {
-      const cartValue = rate.type === "price" ? cartTotalDollars : totalWeightKg;
-      const aboveMin = cartValue >= rate.minValue;
-      const belowMax = rate.maxValue == null || cartValue <= rate.maxValue;
-      return aboveMin && belowMax;
+      const val = rate.type === "price" ? cartTotalDollars : totalWeightKg;
+      return val >= rate.minValue && (rate.maxValue == null || val <= rate.maxValue);
     })
     .map((rate) => ({
       service_name: rate.name,
@@ -90,5 +101,6 @@ export const action = async ({ request }) => {
       max_delivery_date: null,
     }));
 
+  console.log(`[carrier-service] Returning ${matchedRates.length} rate(s)`);
   return Response.json({ rates: matchedRates });
 };

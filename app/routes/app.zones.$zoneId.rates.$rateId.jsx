@@ -1,5 +1,11 @@
 import { redirect, data } from "react-router";
-import { Form, useActionData, useLoaderData, useNavigation } from "react-router";
+import {
+  Form,
+  useActionData,
+  useLoaderData,
+  useNavigation,
+} from "react-router";
+import { useRef, useEffect } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getZone } from "../models/zone.server";
@@ -57,11 +63,36 @@ export default function EditRatePage() {
 
   const isPrice = rate.type === "price";
 
+  const nameRef = useRef(null);
+  const descRef = useRef(null);
+  const minRef = useRef(null);
+  const maxRef = useRef(null);
+  const priceRef = useRef(null);
+
+  // Set initial values from loader data
+  useEffect(() => {
+    if (nameRef.current) nameRef.current.value = rate.name;
+    if (descRef.current) descRef.current.value = rate.description ?? "";
+    if (minRef.current) minRef.current.value = rate.minValue.toFixed(2);
+    if (maxRef.current)
+      maxRef.current.value = rate.maxValue != null ? rate.maxValue.toFixed(2) : "";
+    if (priceRef.current) priceRef.current.value = rate.price.toFixed(2);
+  }, [rate]);
+
+  // Repopulate on validation error
+  useEffect(() => {
+    if (!actionData?.values) return;
+    if (nameRef.current) nameRef.current.value = actionData.values.name ?? "";
+    if (descRef.current) descRef.current.value = actionData.values.description ?? "";
+    if (minRef.current) minRef.current.value = actionData.values.minValue ?? "";
+    if (maxRef.current) maxRef.current.value = actionData.values.maxValue ?? "";
+    if (priceRef.current) priceRef.current.value = actionData.values.price ?? "";
+  }, [actionData]);
+
   return (
     <s-page heading="Edit rate">
       <s-button
         slot="primary-action"
-        variant="primary"
         {...(isSaving ? { loading: true } : {})}
         onClick={() => document.getElementById(FORM_ID)?.requestSubmit()}
       >
@@ -86,69 +117,70 @@ export default function EditRatePage() {
             <s-paragraph>Choose how you want to charge this rate.</s-paragraph>
 
             <s-text-field
+              ref={nameRef}
               label="Rate name"
               name="name"
-              value={actionData?.values?.name ?? rate.name}
               error-message={actionData?.errors?.name ?? ""}
               required
             ></s-text-field>
 
             <s-text-area
+              ref={descRef}
               label="Rate description"
               name="description"
-              value={actionData?.values?.description ?? (rate.description ?? "")}
               rows="2"
             ></s-text-area>
           </s-stack>
         </s-section>
-
-        <s-section slot="aside" heading="Rates">
-          <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Specify which rates apply to the zip codes in this zone.
-            </s-paragraph>
-
-            <s-stack direction="inline" gap="base">
-              <s-number-field
-                label={isPrice ? "Minimum order price" : "Minimum order weight"}
-                name="minValue"
-                value={actionData?.values?.minValue ?? rate.minValue.toFixed(2)}
-                min="0"
-                step="0.01"
-                prefix={isPrice ? "A$" : undefined}
-                suffix={!isPrice ? "kg" : undefined}
-              ></s-number-field>
-
-              <s-number-field
-                label={isPrice ? "Maximum order price" : "Maximum order weight"}
-                name="maxValue"
-                value={
-                  actionData?.values?.maxValue ??
-                  (rate.maxValue != null ? rate.maxValue.toFixed(2) : "")
-                }
-                min="0"
-                step="0.01"
-                prefix={isPrice ? "A$" : undefined}
-                suffix={!isPrice ? "kg" : undefined}
-                placeholder="No maximum"
-              ></s-number-field>
-            </s-stack>
-
-            <s-number-field
-              label="Rate price"
-              name="price"
-              value={actionData?.values?.price ?? rate.price.toFixed(2)}
-              min="0"
-              step="0.01"
-              prefix="A$"
-              error-message={actionData?.errors?.price ?? ""}
-              help-text="Enter 0.00 for free shipping"
-            ></s-number-field>
-          </s-stack>
-        </s-section>
       </Form>
 
-      {/* Delete rate modal */}
+      {/* Rates aside — DIRECT child of s-page, outside Form */}
+      <s-section slot="aside" heading="Rates">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Specify which rates apply to the zip codes in this zone.
+          </s-paragraph>
+
+          <s-stack direction="inline" gap="base">
+            <s-number-field
+              ref={minRef}
+              label={isPrice ? "Minimum order price" : "Minimum order weight"}
+              name="minValue"
+              min="0"
+              step="0.01"
+              prefix={isPrice ? "A$" : undefined}
+              suffix={!isPrice ? "kg" : undefined}
+              form={FORM_ID}
+            ></s-number-field>
+
+            <s-number-field
+              ref={maxRef}
+              label={isPrice ? "Maximum order price" : "Maximum order weight"}
+              name="maxValue"
+              min="0"
+              step="0.01"
+              placeholder="No maximum"
+              prefix={isPrice ? "A$" : undefined}
+              suffix={!isPrice ? "kg" : undefined}
+              form={FORM_ID}
+            ></s-number-field>
+          </s-stack>
+
+          <s-number-field
+            ref={priceRef}
+            label="Rate price"
+            name="price"
+            min="0"
+            step="0.01"
+            prefix="A$"
+            help-text="Enter 0.00 for free shipping"
+            error-message={actionData?.errors?.price ?? ""}
+            form={FORM_ID}
+          ></s-number-field>
+        </s-stack>
+      </s-section>
+
+      {/* Delete modal */}
       <s-modal id="delete-rate-modal" heading="Delete this rate?">
         <s-paragraph>
           Are you sure you want to delete "{rate.name}"? This cannot be undone.

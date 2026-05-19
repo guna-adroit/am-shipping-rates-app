@@ -1,5 +1,12 @@
 import { redirect, data } from "react-router";
-import { Form, useActionData, useLoaderData, useNavigation, useSearchParams } from "react-router";
+import {
+  Form,
+  useActionData,
+  useLoaderData,
+  useNavigation,
+  useSearchParams,
+} from "react-router";
+import { useRef, useEffect } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getZone } from "../models/zone.server";
@@ -50,11 +57,26 @@ export default function NewRatePage() {
   const type = searchParams.get("type") === "weight" ? "weight" : "price";
   const isPrice = type === "price";
 
+  // Refs for repopulating on validation error
+  const nameRef = useRef(null);
+  const descRef = useRef(null);
+  const minRef = useRef(null);
+  const maxRef = useRef(null);
+  const priceRef = useRef(null);
+
+  useEffect(() => {
+    if (!actionData?.values) return;
+    if (nameRef.current) nameRef.current.value = actionData.values.name ?? "";
+    if (descRef.current) descRef.current.value = actionData.values.description ?? "";
+    if (minRef.current) minRef.current.value = actionData.values.minValue ?? "0.00";
+    if (maxRef.current) maxRef.current.value = actionData.values.maxValue ?? "";
+    if (priceRef.current) priceRef.current.value = actionData.values.price ?? "0.00";
+  }, [actionData]);
+
   return (
     <s-page heading="Add rate">
       <s-button
         slot="primary-action"
-        variant="primary"
         {...(isSaving ? { loading: true } : {})}
         onClick={() => document.getElementById(FORM_ID)?.requestSubmit()}
       >
@@ -65,78 +87,84 @@ export default function NewRatePage() {
       </s-link>
 
       <Form method="post" id={FORM_ID}>
-        {/* Pass type as hidden field */}
         <input type="hidden" name="type" value={type} />
 
-        {/* General section — matches screenshot 5 left column */}
         <s-section heading="General">
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Choose how you want to charge this rate.
-            </s-paragraph>
+            <s-paragraph>Choose how you want to charge this rate.</s-paragraph>
 
             <s-text-field
+              ref={nameRef}
               label="Rate name"
               name="name"
-              value={actionData?.values?.name ?? ""}
               error-message={actionData?.errors?.name ?? ""}
               placeholder={isPrice ? "e.g. Standard Shipping" : "e.g. Heavy Freight"}
               required
             ></s-text-field>
 
             <s-text-area
+              ref={descRef}
               label="Rate description"
               name="description"
-              value={actionData?.values?.description ?? ""}
               rows="2"
               placeholder="Optional — shown to customers at checkout"
             ></s-text-area>
           </s-stack>
         </s-section>
+      </Form>
 
-        {/* Rates section — matches screenshot 5 right column */}
-        <s-section slot="aside" heading="Rates">
-          <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Specify which rates apply to the zip codes in this zone.
-            </s-paragraph>
+      {/* Rates section — DIRECT child of s-page (slot="aside") */}
+      <s-section slot="aside" heading="Rates">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Specify which rates apply to the zip codes in this zone.
+          </s-paragraph>
 
-            <s-stack direction="inline" gap="base">
-              <s-number-field
-                label={isPrice ? "Minimum order price" : "Minimum order weight"}
-                name="minValue"
-                value={actionData?.values?.minValue ?? "0.00"}
-                min="0"
-                step="0.01"
-                prefix={isPrice ? "A$" : undefined}
-                suffix={!isPrice ? "kg" : undefined}
-              ></s-number-field>
-
-              <s-number-field
-                label={isPrice ? "Maximum order price" : "Maximum order weight"}
-                name="maxValue"
-                value={actionData?.values?.maxValue ?? ""}
-                min="0"
-                step="0.01"
-                prefix={isPrice ? "A$" : undefined}
-                suffix={!isPrice ? "kg" : undefined}
-                placeholder="No maximum"
-              ></s-number-field>
-            </s-stack>
-
+          {/*
+            These fields are outside <Form> but they submit via the form
+            using the form="create-rate-form" attribute.
+            s- components are form-associated and support the form= attribute.
+          */}
+          <s-stack direction="inline" gap="base">
             <s-number-field
-              label="Rate price"
-              name="price"
-              value={actionData?.values?.price ?? "0.00"}
+              ref={minRef}
+              label={isPrice ? "Minimum order price" : "Minimum order weight"}
+              name="minValue"
               min="0"
               step="0.01"
-              prefix="A$"
-              error-message={actionData?.errors?.price ?? ""}
-              help-text="Enter 0.00 for free shipping"
+              value="0.00"
+              prefix={isPrice ? "A$" : undefined}
+              suffix={!isPrice ? "kg" : undefined}
+              form={FORM_ID}
+            ></s-number-field>
+
+            <s-number-field
+              ref={maxRef}
+              label={isPrice ? "Maximum order price" : "Maximum order weight"}
+              name="maxValue"
+              min="0"
+              step="0.01"
+              placeholder="No maximum"
+              prefix={isPrice ? "A$" : undefined}
+              suffix={!isPrice ? "kg" : undefined}
+              form={FORM_ID}
             ></s-number-field>
           </s-stack>
-        </s-section>
-      </Form>
+
+          <s-number-field
+            ref={priceRef}
+            label="Rate price"
+            name="price"
+            min="0"
+            step="0.01"
+            value="0.00"
+            prefix="A$"
+            help-text="Enter 0.00 for free shipping"
+            error-message={actionData?.errors?.price ?? ""}
+            form={FORM_ID}
+          ></s-number-field>
+        </s-stack>
+      </s-section>
     </s-page>
   );
 }
