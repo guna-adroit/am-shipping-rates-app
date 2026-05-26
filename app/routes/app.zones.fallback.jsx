@@ -1,26 +1,28 @@
+/**
+ * app/routes/app.zones.fallback.jsx
+ *
+ * Manages the single fallback zone for this shop.
+ * The fallback zone is shown to customers whose zip code doesn't match
+ * any regular zone. It reuses the full rates infrastructure (price + weight).
+ *
+ * Access this page from your zones list with a "Configure fallback rates" link.
+ */
+
 import { redirect, data } from "react-router";
-import {
-  Form,
-  useFetcher,
-  useLoaderData,
-  useActionData,
-  useNavigation,
-} from "react-router";
+import { Form, useFetcher, useLoaderData, useActionData, useNavigation } from "react-router";
 import { useRef, useEffect, useState, useCallback } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
-  getZone,
+  getFallbackZone,
+  createFallbackZone,
   updateZone,
-  deleteZone,
-  validateZipCodes,
   validateConditions,
 } from "../models/zone.server";
 import { deleteRate } from "../models/rate.server";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// parseConditions — inlined (pure JS, no server deps) to avoid the
-// "server-only module referenced by client" error.
+// parseConditions — inlined (pure JS, no server deps)
 // ─────────────────────────────────────────────────────────────────────────────
 
 function parseConditions(raw) {
@@ -35,7 +37,7 @@ function parseConditions(raw) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Condition builder config
+// Condition builder helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ATTRIBUTE_OPTIONS = [
@@ -56,13 +58,12 @@ const ATTRIBUTE_OPTIONS = [
   { value: "volume",     label: "Volume (cm³)",   numeric: true  },
 ];
 
-const TEXT_OPERATORS = [
+const TEXT_OPERATORS    = [
   { value: "equals",       label: "equals" },
   { value: "not_equals",   label: "does not equal" },
   { value: "contains",     label: "contains" },
   { value: "not_contains", label: "does not contain" },
 ];
-
 const NUMERIC_OPERATORS = [
   { value: "equals",       label: "equals" },
   { value: "not_equals",   label: "does not equal" },
@@ -93,10 +94,10 @@ function displayValue(rule) {
 // Loader
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const loader = async ({ request, params }) => {
+export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
-  const zone = await getZone(params.zoneId, session.shop);
-  if (!zone) throw new Response("Zone not found", { status: 404 });
+  const zone = await getFallbackZone(session.shop);
+  // zone may be null if not yet created — the UI handles this
   return { zone };
 };
 
@@ -104,49 +105,44 @@ export const loader = async ({ request, params }) => {
 // Action
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const action = async ({ request, params }) => {
+export const action = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent   = formData.get("intent");
 
-  if (intent === "delete-zone") {
-    await deleteZone(params.zoneId);
-    return redirect("/app/zones");
+  // ── Create the fallback zone for the first time ──
+  if (intent === "create-fallback") {
+    const existing = await getFallbackZone(session.shop);
+    if (!existing) await createFallbackZone(session.shop);
+    return redirect("/app/zones/fallback");
   }
 
+  // ── Delete a rate ──
   if (intent === "delete-rate") {
     const rateId = formData.get("rateId")?.toString();
     if (rateId) await deleteRate(rateId);
     return { ok: true };
   }
 
-  // Default: update zone
+  // ── Update fallback zone ──
+  const zone = await getFallbackZone(session.shop);
+  if (!zone) return redirect("/app/zones/fallback");
+
   const name       = formData.get("name")?.toString().trim() ?? "";
-  const zipCodes   = formData.get("zipCodes")?.toString().trim() ?? "";
   const status     = formData.get("status")?.toString() ?? "enabled";
   const conditions = formData.get("conditions")?.toString() ?? "";
-  const isFallback = formData.get("isFallback") === "true";
 
   const errors = {};
   if (!name) errors.name = "Zone name is required";
-
-  if (!isFallback) {
-    if (!zipCodes) {
-      errors.zipCodes = "At least one zip code or range is required";
-    } else {
-      const zipError = validateZipCodes(zipCodes);
-      if (zipError) errors.zipCodes = zipError;
-    }
-  }
 
   const condError = validateConditions(conditions);
   if (condError) errors.conditions = condError;
 
   if (Object.keys(errors).length) {
-    return data({ errors, values: { name, zipCodes, status, conditions } }, { status: 400 });
+    return data({ errors, values: { name, status, conditions } }, { status: 400 });
   }
 
-  await updateZone(params.zoneId, { name, zipCodes, status, conditions, isFallback });
+  await updateZone(zone.id, { name, zipCodes: "", status, conditions, isFallback: true });
   return { ok: true, saved: true };
 };
 
@@ -154,70 +150,65 @@ export const action = async ({ request, params }) => {
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function EditZoneIndexPage() {
+export default function FallbackZonePage() {
   const { zone }    = useLoaderData();
   const actionData  = useActionData();
   const navigation  = useNavigation();
   const rateFetcher = useFetcher();
-  const FORM_ID       = "edit-zone-form";
-  const DELETE_FORM_ID = "delete-zone-form";
 
-  const isSaving =
-    navigation.state === "submitting" &&
-    navigation.formData?.get("intent") !== "delete-zone";
+  const isSaving = navigation.state === "submitting" &&
+    navigation.formData?.get("intent") !== "create-fallback";
+
+  const FORM_ID = "fallback-zone-form";
 
   // Zone field refs
-  const nameRef     = useRef(null);
-  const zipCodesRef = useRef(null);
-  const statusRef   = useRef(null);
+  const nameRef   = useRef(null);
+  const statusRef = useRef(null);
 
   // Store originals for Discard
-  const originalConditions = useRef(parseConditions(zone.conditions));
+  const originalConditions = useRef(parseConditions(zone?.conditions));
   const originalZone       = useRef(zone);
 
   // Condition builder state
-  const [conditions, setConditions] = useState(() => parseConditions(zone.conditions));
+  const [conditions, setConditions] = useState(() => parseConditions(zone?.conditions));
 
   // Condition modal state
-  // editingRuleId: null = "Add" mode, string = "Edit" mode
   const [editingRuleId, setEditingRuleId] = useState(null);
   const [modalAttr, setModalAttr] = useState("sku");
   const [modalOp,   setModalOp]   = useState("equals");
 
-// Condition modal field refs
+  // Condition modal refs
   const condAttrRef   = useRef(null);
   const condOpRef     = useRef(null);
   const condValueRef  = useRef(null);
   const condValue2Ref = useRef(null);
 
-  const COND_MODAL_ID    = "cond-modal";
-  const openModalBtnRef  = useRef(null);  // clicks hidden button to open s-modal via commandFor
-  const closeModalBtnRef = useRef(null);  // clicks hidden button to close s-modal via commandFor
-  const openModal  = () => openModalBtnRef.current?.click();
-  const closeModal = () => closeModalBtnRef.current?.click();
+  const COND_MODAL_ID = "cond-modal-fallback";
+  const openModal  = () => document.getElementById(COND_MODAL_ID)?.showModal?.();
+  const closeModal = () => document.getElementById(COND_MODAL_ID)?.close?.();
 
-  // ── Populate zone fields from loader (refreshes originals after each save) ──
+  // ── Set field values from loader data (refreshes originals after each save) ──
   useEffect(() => {
-    if (nameRef.current)     nameRef.current.value     = zone.name;
-    if (zipCodesRef.current) zipCodesRef.current.value = zone.zipCodes;
-    if (statusRef.current)   statusRef.current.value   = zone.status;
+    if (!zone) return;
+    if (nameRef.current)   nameRef.current.value   = zone.name;
+    if (statusRef.current) statusRef.current.value = zone.status;
+    const parsed = parseConditions(zone.conditions);
+    setConditions(parsed);
     originalZone.current       = zone;
-    originalConditions.current = parseConditions(zone.conditions);
-    setConditions(parseConditions(zone.conditions));
+    originalConditions.current = parsed;
   }, [zone]);
 
   // ── Repopulate on validation error ──
   useEffect(() => {
     if (!actionData?.values) return;
-    if (nameRef.current)     nameRef.current.value     = actionData.values.name     ?? "";
-    if (zipCodesRef.current) zipCodesRef.current.value = actionData.values.zipCodes ?? "";
-    if (statusRef.current)   statusRef.current.value   = actionData.values.status   ?? "enabled";
+    if (nameRef.current)   nameRef.current.value   = actionData.values.name   ?? "";
+    if (statusRef.current) statusRef.current.value = actionData.values.status ?? "enabled";
     if (actionData.values.conditions) {
       try { setConditions(JSON.parse(actionData.values.conditions)); } catch {}
     }
   }, [actionData]);
 
-  // ── Sync operator select when modalAttr changes ──
+  // ── Sync operator select when attribute changes ──
   useEffect(() => {
     const ops = getOperators(modalAttr);
     const defaultOp = ops[0].value;
@@ -225,7 +216,6 @@ export default function EditZoneIndexPage() {
     if (condOpRef.current) condOpRef.current.value = defaultOp;
   }, [modalAttr]);
 
-  // ── Helpers to imperatively populate modal web-component fields ──
   const populateModal = useCallback((attr, op, value, value2) => {
     setTimeout(() => {
       if (condAttrRef.current)   condAttrRef.current.value   = attr;
@@ -235,7 +225,6 @@ export default function EditZoneIndexPage() {
     }, 30);
   }, []);
 
-  // ── Open modal in ADD mode ──
   const openAddModal = useCallback(() => {
     setEditingRuleId(null);
     setModalAttr("sku");
@@ -244,7 +233,6 @@ export default function EditZoneIndexPage() {
     openModal();
   }, [populateModal]);
 
-  // ── Open modal in EDIT mode ──
   const openEditModal = useCallback((rule) => {
     setEditingRuleId(rule.id);
     setModalAttr(rule.attribute);
@@ -253,7 +241,26 @@ export default function EditZoneIndexPage() {
     openModal();
   }, [populateModal]);
 
-  // ── Save (add or update) condition ──
+  const handleModalAttrChange = useCallback((e) => setModalAttr(e.target.value), []);
+  const handleModalOpChange   = useCallback((e) => setModalOp(e.target.value), []);
+
+  // ── Discard — restore all fields to last saved state ──
+  const handleDiscard = useCallback(() => {
+    if (!originalZone.current) return;
+    const orig = originalZone.current;
+    if (nameRef.current)   nameRef.current.value   = orig.name;
+    if (statusRef.current) statusRef.current.value = orig.status;
+    setConditions(originalConditions.current);
+  }, []);
+
+  // s-choice-list fires a custom event — value is in e.target.value
+  // (same as native inputs; Polaris web components mirror the standard pattern)
+  const handleLogicChange     = useCallback((e) => {
+    const value = e.target.value ?? e.detail?.value;
+    if (value) setConditions((prev) => ({ ...prev, logic: value }));
+  }, []);
+
+
   const handleSaveCondition = useCallback(() => {
     const attribute = condAttrRef.current?.value  || "sku";
     const operator  = condOpRef.current?.value    || "equals";
@@ -262,17 +269,13 @@ export default function EditZoneIndexPage() {
     if (!value) return;
 
     if (editingRuleId) {
-      // UPDATE existing rule in-place
       setConditions((prev) => ({
         ...prev,
         rules: prev.rules.map((r) =>
-          r.id === editingRuleId
-            ? { ...r, attribute, operator, value, value2 }
-            : r
+          r.id === editingRuleId ? { ...r, attribute, operator, value, value2 } : r
         ),
       }));
     } else {
-      // ADD new rule
       setConditions((prev) => ({
         ...prev,
         rules: [...prev.rules, { id: generateId(), attribute, operator, value, value2 }],
@@ -281,44 +284,43 @@ export default function EditZoneIndexPage() {
     closeModal();
   }, [editingRuleId]);
 
-  // ── Remove a rule ──
   const removeRule = useCallback((id) => {
     setConditions((prev) => ({ ...prev, rules: prev.rules.filter((r) => r.id !== id) }));
   }, []);
 
-  // ── Discard — restore all fields to last saved state ──
-  const handleDiscard = useCallback(() => {
-    const orig = originalZone.current;
-    if (nameRef.current)     nameRef.current.value     = orig.name;
-    if (zipCodesRef.current) zipCodesRef.current.value = orig.zipCodes;
-    if (statusRef.current)   statusRef.current.value   = orig.status;
-    setConditions(originalConditions.current);
-  }, []);
+  const isBetween = modalOp === "between";
+  const isNumeric = ATTRIBUTE_OPTIONS.find((a) => a.value === modalAttr)?.numeric ?? false;
+  const priceRates  = zone?.rates.filter((r) => r.type === "price")  ?? [];
+  const weightRates = zone?.rates.filter((r) => r.type === "weight") ?? [];
 
-  // s-choice-list fires a custom event — value is in e.target.value
-  // (same as native inputs; Polaris web components mirror the standard pattern)
-  const handleLogicChange = useCallback((e) => {
-    const value = e.target.value ?? e.detail?.value;
-    if (value) setConditions((prev) => ({ ...prev, logic: value }));
-  }, []);
-
-
-
-  const handleModalAttrChange = useCallback((e) => {
-    setModalAttr(e.target.value);
-  }, []);
-
-  const handleModalOpChange = useCallback((e) => {
-    setModalOp(e.target.value);
-  }, []);
-
-  const isBetween  = modalOp === "between";
-  const isNumeric  = ATTRIBUTE_OPTIONS.find((a) => a.value === modalAttr)?.numeric ?? false;
-  const priceRates  = zone.rates.filter((r) => r.type === "price");
-  const weightRates = zone.rates.filter((r) => r.type === "weight");
+  // ── Not yet configured ──
+  if (!zone) {
+    return (
+      <s-page heading="Fallback Rates">
+        <s-link slot="secondary-actions" href="/app/zones">Back to zones</s-link>
+        <s-section heading="No fallback rates configured">
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              Fallback rates are shown to customers whose zip code doesn't match any
+              of your regular shipping zones. This ensures every customer sees a
+              shipping option at checkout.
+            </s-paragraph>
+            <s-paragraph>
+              Once enabled, you can add price-based and weight-based rates to the
+              fallback zone, just like any regular zone.
+            </s-paragraph>
+            <Form method="post">
+              <input type="hidden" name="intent" value="create-fallback" />
+              <s-button type="submit" variant="primary">Enable fallback rates</s-button>
+            </Form>
+          </s-stack>
+        </s-section>
+      </s-page>
+    );
+  }
 
   return (
-    <s-page heading={zone.isFallback ? "Edit Fallback Zone" : "Edit Zone"}>
+    <s-page heading="Fallback Rates">
       <s-button
         slot="primary-action"
         {...(isSaving ? { loading: true } : {})}
@@ -326,17 +328,7 @@ export default function EditZoneIndexPage() {
       >
         Save
       </s-button>
-      <s-link slot="secondary-actions" href="/app/zones">Cancel</s-link>
-      {!zone.isFallback && (
-        <s-button
-          slot="secondary-actions"
-          tone="critical"
-          variant="primary"
-          commandFor="delete-zone-modal"
-        >
-          Delete zone
-        </s-button>
-      )}
+      <s-link slot="secondary-actions" href="/app/zones">Back to zones</s-link>
 
       <Form
         method="post"
@@ -345,22 +337,17 @@ export default function EditZoneIndexPage() {
         data-discard-confirmation
         onReset={handleDiscard}
       >
-        <input type="hidden" name="intent"     value="update-zone" />
-        <input type="hidden" name="isFallback" value={String(zone.isFallback)} />
         <input type="hidden" name="conditions" value={JSON.stringify(conditions)} />
 
-        <s-stack gap="base">
-        {/* ── Zone details ── */}
-        <s-section heading="Zone details">
+        {/* ── Settings ── */}
+        <s-section heading="Fallback settings">
           <s-stack direction="block" gap="base">
-            {zone.isFallback && (
-              <s-banner tone="info">
-                <s-text>
-                  This is the <strong>fallback zone</strong>. Its rates are shown to
-                  customers whose zip code doesn't match any other zone.
-                </s-text>
-              </s-banner>
-            )}
+            <s-banner tone="info">
+              <s-text>
+                These rates are shown when no zone matches the customer's zip code.
+                They act as a safety net so no customer is ever blocked at checkout.
+              </s-text>
+            </s-banner>
 
             <s-text-field
               ref={nameRef}
@@ -371,32 +358,19 @@ export default function EditZoneIndexPage() {
               required
             ></s-text-field>
 
-            {!zone.isFallback && (
-              <s-text-area
-                ref={zipCodesRef}
-                label="Zip codes"
-                name="zipCodes"
-                rows="5"
-                help-text="Separate entries with a comma. Use a hyphen for ranges (e.g. 4000-4100)."
-                error-message={actionData?.errors?.zipCodes ?? ""}
-                required
-                placeholder="e.g. 4000-4100, 4301-4400, 4516"
-              ></s-text-area>
-            )}
-
-            <s-select ref={statusRef} label="Zone status" name="status">
-              <s-option value="enabled">Enabled</s-option>
-              <s-option value="disabled">Disabled</s-option>
+            <s-select ref={statusRef} label="Fallback status" name="status">
+              <s-option value="enabled">Enabled — show fallback rates when no zone matches</s-option>
+              <s-option value="disabled">Disabled — hide shipping options when no zone matches</s-option>
             </s-select>
           </s-stack>
         </s-section>
 
-        {/* ── Product conditions ── */}
-        <s-section heading="Product conditions">
+        {/* ── Product conditions (optional) ── */}
+        <s-section heading="Product conditions (optional)">
           <s-stack direction="block" gap="base">
             <s-paragraph>
-              Restrict this zone to carts that contain specific products.
-              Leave empty to apply this zone to all products.
+              Optionally restrict the fallback to specific products. Leave empty to
+              apply to all products that don't match a regular zone.
             </s-paragraph>
 
             {actionData?.errors?.conditions && (
@@ -410,16 +384,10 @@ export default function EditZoneIndexPage() {
               label="Conditions"
               name="conditionLogic"
               onChange={handleLogicChange}
-              direction="inline"
-              style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
-                  gap: "12px",
-                }}
             >
-                <s-choice value="all" {...(conditions.logic === "all" ? { selected: true } : {})}>All conditions must match</s-choice>
-                <s-choice value="any" {...(conditions.logic === "any" ? { selected: true } : {})}>Any condition must match</s-choice>
-                <s-choice value="none" {...(conditions.logic === "none" ? { selected: true } : {})}>None of the conditions match</s-choice>
+              <s-choice value="all" {...(conditions.logic === "all" ? { selected: true } : {})}>All conditions must match</s-choice>
+              <s-choice value="any" {...(conditions.logic === "any" ? { selected: true } : {})}>Any condition must match</s-choice>
+              <s-choice value="none" {...(conditions.logic === "none" ? { selected: true } : {})}>None of the conditions match</s-choice>
             </s-choice-list>
 
             {/* Rules list */}
@@ -434,26 +402,13 @@ export default function EditZoneIndexPage() {
                         <strong>{displayValue(rule)}</strong>
                       </s-text>
                     </s-stack>
-                    <s-button
-                      type="button"
-                      variant="tertiary"
-                      onClick={() => openEditModal(rule)}
-                    >
-                      Edit
-                    </s-button>
-                    <s-button
-                      type="button"
-                      tone="critical"
-                      variant="tertiary"
-                      onClick={() => removeRule(rule.id)}
-                    >
-                      Remove
-                    </s-button>
+                    <s-button type="button" variant="tertiary" onClick={() => openEditModal(rule)}>Edit</s-button>
+                    <s-button type="button" tone="critical" variant="tertiary" onClick={() => removeRule(rule.id)}>Remove</s-button>
                   </s-stack>
                 ))}
               </s-stack>
             ) : (
-              <s-paragraph>No conditions added. This zone applies to all products.</s-paragraph>
+              <s-paragraph>No conditions added. Fallback applies to all unmatched carts.</s-paragraph>
             )}
 
             <s-button type="button" variant="primary" onClick={openAddModal}>
@@ -461,13 +416,12 @@ export default function EditZoneIndexPage() {
             </s-button>
           </s-stack>
         </s-section>
-        </s-stack>
       </Form>
 
       {/* ── Rates (aside) ── */}
-      <s-section slot="aside" heading="Rates">
+      <s-section slot="aside" heading="Fallback rates">
         <s-stack direction="block" gap="base">
-          {/* Price-based rates */}
+          {/* Price-based */}
           <s-stack direction="block" gap="small">
             <s-stack direction="inline" gap="base">
               <s-text><strong>Price-based rates</strong></s-text>
@@ -476,31 +430,32 @@ export default function EditZoneIndexPage() {
               </s-link>
             </s-stack>
             <s-paragraph>Rates based on the order price.</s-paragraph>
+            {priceRates.length === 0 && (
+              <s-paragraph style={{ color: "#888" }}>No rates yet.</s-paragraph>
+            )}
             {priceRates.map((rate) => (
-              <div style={{ backgroundColor: "#f2f2f2", padding: "12px", borderRadius: "8px" }} >
-                <s-stack key={rate.id} direction="inline" gap="base" >
-                  <s-stack direction="block" gap="none">
-                    <s-heading>{rate.name}</s-heading>
-                    <s-text>
-                      ${rate.minValue.toFixed(2)} – {rate.maxValue != null ? `$${rate.maxValue.toFixed(2)}` : "No max"} → {rate.price === 0 ? "Free" : `$${rate.price.toFixed(2)}`}
-                    </s-text>
-                  </s-stack>
-                  <s-stack direction="inline" gap="small">
-                    <s-button href={`/app/zones/${zone.id}/rates/${rate.id}`} tone="neutral">Edit</s-button>
-                    <rateFetcher.Form method="post">
-                      <input type="hidden" name="intent" value="delete-rate" />
-                      <input type="hidden" name="rateId" value={rate.id} />
-                      <s-button tone="critical" variant="secondary" type="submit">Delete</s-button>
-                    </rateFetcher.Form>
-                  </s-stack>
+              <s-stack key={rate.id} direction="inline" gap="base">
+                <s-stack direction="block" gap="none">
+                  <s-text>{rate.name}</s-text>
+                  <s-text>
+                    ${rate.minValue.toFixed(2)} – {rate.maxValue != null ? `$${rate.maxValue.toFixed(2)}` : "No max"} → {rate.price === 0 ? "Free" : `$${rate.price.toFixed(2)}`}
+                  </s-text>
                 </s-stack>
-              </div>
+                <s-stack direction="inline" gap="small">
+                  <s-link href={`/app/zones/${zone.id}/rates/${rate.id}`}>Edit</s-link>
+                  <rateFetcher.Form method="post">
+                    <input type="hidden" name="intent" value="delete-rate" />
+                    <input type="hidden" name="rateId" value={rate.id} />
+                    <s-button tone="critical" variant="tertiary" type="submit">Delete</s-button>
+                  </rateFetcher.Form>
+                </s-stack>
+              </s-stack>
             ))}
           </s-stack>
 
           <s-divider></s-divider>
 
-          {/* Weight-based rates */}
+          {/* Weight-based */}
           <s-stack direction="block" gap="small">
             <s-stack direction="inline" gap="base">
               <s-text><strong>Weight-based rates</strong></s-text>
@@ -509,63 +464,50 @@ export default function EditZoneIndexPage() {
               </s-link>
             </s-stack>
             <s-paragraph>Rates based on the order weight.</s-paragraph>
+            {weightRates.length === 0 && (
+              <s-paragraph style={{ color: "#888" }}>No rates yet.</s-paragraph>
+            )}
             {weightRates.map((rate) => (
-              <div style={{ backgroundColor: "#f2f2f2", padding: "12px", borderRadius: "8px" }} >
-                <s-stack key={rate.id} direction="inline" gap="base">
-                  <s-stack direction="block" gap="none">
-                    <s-heading>{rate.name}</s-heading>
-                    <s-text>
-                      {rate.minValue.toFixed(2)}kg – {rate.maxValue != null ? `${rate.maxValue.toFixed(2)}kg` : "No max"} → {rate.price === 0 ? "Free" : `$${rate.price.toFixed(2)}`}
-                    </s-text>
-                  </s-stack>
-                  <s-stack direction="inline" gap="small">
-                    <s-button href={`/app/zones/${zone.id}/rates/${rate.id}`} tone="neutral">Edit</s-button>
-                    <rateFetcher.Form method="post">
-                      <input type="hidden" name="intent" value="delete-rate" />
-                      <input type="hidden" name="rateId" value={rate.id} />
-                      <s-button tone="critical" variant="secondary" type="submit">Delete</s-button>
-                    </rateFetcher.Form>
-                  </s-stack>
+              <s-stack key={rate.id} direction="inline" gap="base">
+                <s-stack direction="block" gap="none">
+                  <s-text>{rate.name}</s-text>
+                  <s-text>
+                    {rate.minValue.toFixed(2)}kg – {rate.maxValue != null ? `${rate.maxValue.toFixed(2)}kg` : "No max"} → {rate.price === 0 ? "Free" : `$${rate.price.toFixed(2)}`}
+                  </s-text>
                 </s-stack>
-              </div>
+                <s-stack direction="inline" gap="small">
+                  <s-link href={`/app/zones/${zone.id}/rates/${rate.id}`}>Edit</s-link>
+                  <rateFetcher.Form method="post">
+                    <input type="hidden" name="intent" value="delete-rate" />
+                    <input type="hidden" name="rateId" value={rate.id} />
+                    <s-button tone="critical" variant="tertiary" type="submit">Delete</s-button>
+                  </rateFetcher.Form>
+                </s-stack>
+              </s-stack>
             ))}
           </s-stack>
         </s-stack>
       </s-section>
 
-      {/* ── Delete zone modal ── */}
-      {!zone.isFallback && (
-        <>
-          <s-modal id="delete-zone-modal" heading={`Delete "${zone.name}"?`}>
-            <s-paragraph>
-              This will permanently delete the zone and all its rates. This cannot be undone.
-            </s-paragraph>
-            <s-button
-              slot="primary-action"
-              tone="critical"
-              onClick={() => document.getElementById(DELETE_FORM_ID)?.requestSubmit()}
-            >
-              Delete
-            </s-button>
-            <s-button slot="secondary-actions" commandFor="delete-zone-modal">Cancel</s-button>
-          </s-modal>
-          <Form method="post" id={DELETE_FORM_ID}>
-            <input type="hidden" name="intent" value="delete-zone" />
-          </Form>
-        </>
-      )}
-
-      {/* ── Add / Edit condition modal ── */}
-      
-      <s-button
-        ref={openModalBtnRef}
-        commandFor="cond-modal"
-        style={{ visibility: "hidden", position: "absolute", pointerEvents: "none" }}
-      ></s-button>
-
-      {/* ── Add / Edit condition modal ── */}
-      <s-modal id="cond-modal" heading={editingRuleId ? "Edit condition" : "Add condition"}>
+      {/* ── Add / Edit condition modal (native <dialog>) ── */}
+      <dialog
+        id={COND_MODAL_ID}
+        style={{
+          border: "none",
+          borderRadius: "12px",
+          padding: "24px",
+          minWidth: "480px",
+          maxWidth: "560px",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
+          background: "white",
+        }}
+      >
         <s-stack direction="block" gap="base">
+          <s-stack direction="inline" gap="base" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <s-text><strong>{editingRuleId ? "Edit condition" : "Add condition"}</strong></s-text>
+            <s-button type="button" variant="tertiary" onClick={closeModal}>✕</s-button>
+          </s-stack>
+
           <s-select ref={condAttrRef} label="Product attribute" onChange={handleModalAttrChange}>
             {ATTRIBUTE_OPTIONS.map((opt) => (
               <s-option key={opt.value} value={opt.value}>{opt.label}</s-option>
@@ -588,33 +530,15 @@ export default function EditZoneIndexPage() {
           {isBetween && (
             <s-text-field ref={condValue2Ref} label="To value" placeholder="e.g. 150"></s-text-field>
           )}
+
+          <s-stack direction="inline" gap="small" style={{ justifyContent: "flex-end" }}>
+            <s-button type="button" variant="secondary" onClick={closeModal}>Cancel</s-button>
+            <s-button type="button" variant="primary" onClick={handleSaveCondition}>
+              {editingRuleId ? "Update" : "Add"}
+            </s-button>
+          </s-stack>
         </s-stack>
-
-        {/* Hidden s-button close trigger — commandFor only works on s-button */}
-        <s-button
-          ref={closeModalBtnRef}
-          commandFor="cond-modal"
-          command="--hide"
-          style={{ visibility: "hidden", position: "absolute", pointerEvents: "none" }}
-        ></s-button>
-
-        <s-button
-          slot="secondary-actions"
-          commandFor="cond-modal"
-          command="--hide"
-        >
-          Cancel
-        </s-button>
-        <s-button
-          slot="primary-action"
-          variant="primary"
-          commandFor="cond-modal"
-          command="--hide"
-          onClick={handleSaveCondition}
-        >
-          {editingRuleId ? "Update" : "Add"}
-        </s-button>
-      </s-modal>
+      </dialog>
     </s-page>
   );
 }

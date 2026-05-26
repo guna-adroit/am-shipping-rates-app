@@ -20,7 +20,9 @@ export const action = async ({ request }) => {
   }
 
   // 1. Identify shop
-  const shopDomain = request.headers.get("X-Shopify-Shop-Domain") || "am-shipping-rates.myshopify.com"; // for local testing with Shopify CLI preview URL
+  const shopDomain =
+    request.headers.get("X-Shopify-Shop-Domain") ||
+    "am-shipping-rates.myshopify.com"; // for local testing with Shopify CLI preview URL
   if (!shopDomain) {
     console.error("[carrier-service] Missing X-Shopify-Shop-Domain header");
     return Response.json({ error: "Missing shop domain header" }, { status: 400 });
@@ -28,7 +30,6 @@ export const action = async ({ request }) => {
   console.log(`[carrier-service] Called for shop: ${shopDomain}`);
 
   // 2. Verify this shop has the app installed
-  // Use CarrierService record — more reliable than Session (sessions can expire)
   const carrierRecord = await db.carrierService.findUnique({
     where: { shopDomain },
     select: { id: true },
@@ -49,53 +50,64 @@ export const action = async ({ request }) => {
   const rateRequest = body?.rate;
   if (!rateRequest) return Response.json({ rates: [] });
 
-  // IMPORTANT: Shopify uses "postal_code" not "zip"
   const destinationZip = rateRequest.destination?.postal_code;
-  const currency = rateRequest.currency || "AUD";
+  const currency       = rateRequest.currency || "AUD";
+  const lineItems      = rateRequest.items ?? [];
 
   console.log(`[carrier-service] Destination postal_code: "${destinationZip}"`);
+  console.log(`[carrier-service] Line items count: ${lineItems.length}`);
 
   if (!destinationZip) {
     console.error("[carrier-service] No postal_code in destination");
     return Response.json({ rates: [] });
   }
 
-  // 4. Find matching zone
-  const zone = await findZoneByZip(shopDomain, destinationZip);
+  // 4. Find matching zone (regular or fallback)
+  //    Pass lineItems so product conditions can be evaluated.
+  //    findZoneByZip returns: { zone, isFallback: boolean } | null
+  const result = await findZoneByZip(shopDomain, destinationZip, lineItems);
+
+  if (!result) {
+    // No regular zone matched AND no fallback is configured/enabled
+    console.log("[carrier-service] Zone match: none — returning no rates");
+    return Response.json({ rates: [] });
+  }
+
+  const { zone, isFallback } = result;
+
   console.log(
-    `[carrier-service] Zone match: ${zone ? `"${zone.name}" (${zone.rates.length} rates)` : "none"}`
+    `[carrier-service] Zone match: "${zone.name}" (${zone.rates.length} rates)${isFallback ? " [FALLBACK]" : ""}`
   );
 
-  if (!zone || zone.rates.length === 0) {
+  if (zone.rates.length === 0) {
+    console.log(`[carrier-service] Zone "${zone.name}" has no rates configured`);
     return Response.json({ rates: [] });
   }
 
   // 5. Calculate cart totals
   // Shopify sends item prices in cents → convert to dollars
   const cartTotalDollars =
-    (rateRequest.items ?? []).reduce(
-      (sum, item) => sum + item.price * item.quantity, 0
-    ) / 100;
+    lineItems.reduce((sum, item) => sum + item.price * item.quantity, 0) / 100;
 
   // Shopify sends weight in grams → convert to kg
   const totalWeightKg =
-    (rateRequest.items ?? []).reduce(
-      (sum, item) => sum + (item.grams ?? 0) * item.quantity, 0
-    ) / 1000;
+    lineItems.reduce((sum, item) => sum + (item.grams ?? 0) * item.quantity, 0) / 1000;
 
-  console.log(`[carrier-service] Cart total: $${cartTotalDollars.toFixed(2)}, weight: ${totalWeightKg.toFixed(3)}kg`);
+  console.log(
+    `[carrier-service] Cart total: $${cartTotalDollars.toFixed(2)}, weight: ${totalWeightKg.toFixed(3)}kg`
+  );
 
-  // 6. Filter matching rates
+  // 6. Filter matching rates and build response
   const matchedRates = zone.rates
     .filter((rate) => {
       const val = rate.type === "price" ? cartTotalDollars : totalWeightKg;
       return val >= rate.minValue && (rate.maxValue == null || val <= rate.maxValue);
     })
     .map((rate) => ({
-      service_name: rate.name,
-      service_code: `zip_rate_${rate.id}`,
-      total_price: Math.round(rate.price * 100).toString(), // Shopify expects cents as string
-      description: rate.description ?? "",
+      service_name:      rate.name,
+      service_code:      `zip_rate_${rate.id}`,
+      total_price:       Math.round(rate.price * 100).toString(), // Shopify expects cents as string
+      description:       rate.description ?? "",
       currency,
       min_delivery_date: null,
       max_delivery_date: null,

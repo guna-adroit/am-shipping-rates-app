@@ -207,7 +207,18 @@ export default function ZonesIndexPage() {
             </s-table>
           )}
         </s-stack>
+        
       </s-section>
+      <s-button
+        onClick={() => navigate("/app/zones/new")}
+      >
+        Create a zone
+      </s-button>
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <s-link href="/app/zones/fallback">
+          Configure fallback rates
+        </s-link>
+      </div>
     </s-page>
   );
 }
